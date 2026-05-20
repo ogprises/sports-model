@@ -35,6 +35,40 @@ def load_schedule():
     sched = nfl.load_schedules(seasons=[season]).to_pandas()
     return sched, season, current_week
 
+@st.cache_data(ttl=900)
+def load_qb_status(season, week):
+    """For each team, find QB1 (from depth chart) and their injury status for the week."""
+    try:
+        dc = nfl.load_depth_charts(seasons=[season]).to_pandas()
+        qb1 = (
+            dc[(dc["position"] == "QB") & (dc["depth_team"] == "1") & (dc["week"] == week)]
+            [["club_code", "full_name", "gsis_id"]]
+            .rename(columns={"club_code": "team"})
+            .drop_duplicates(subset=["team"])
+        )
+        inj = nfl.load_injuries(seasons=[season]).to_pandas()
+        wk = inj[(inj["week"] == week) & (inj["position"] == "QB")][
+            ["team", "gsis_id", "report_status", "report_primary_injury"]
+        ]
+        return qb1.merge(wk, on=["team", "gsis_id"], how="left")
+    except Exception:
+        return pd.DataFrame(columns=["team", "full_name", "report_status"])
+
+def qb_alert_for(team, qb1_status):
+    row = qb1_status[qb1_status["team"] == team]
+    if row.empty:
+        return ""
+    r = row.iloc[0]
+    status = r.get("report_status")
+    name = r.get("full_name", "QB1")
+    if status == "Out":
+        return f"🚨 {name} OUT"
+    if status == "Doubtful":
+        return f"⚠️ {name} doubtful"
+    if status == "Questionable":
+        return f"❓ {name} questionable"
+    return ""
+
 # ----- header -----
 st.title("🏈 NFL Picks")
 
@@ -122,6 +156,14 @@ g["vegas_line"] = g.apply(lambda r: fmt_line(r["home_team"], r["spread_line"]), 
 g["model_line"] = g.apply(lambda r: fmt_line(r["home_team"], -r["pred_margin"]), axis=1)
 g["matchup"] = g["away_team"] + " @ " + g["home_team"]
 
+# QB status alerts (display only — not used in model, see diagnostics for why)
+qb1_status = load_qb_status(season, week)
+g["home_qb"] = g["home_team"].apply(lambda t: qb_alert_for(t, qb1_status))
+g["away_qb"] = g["away_team"].apply(lambda t: qb_alert_for(t, qb1_status))
+g["qb_notes"] = g.apply(
+    lambda r: " · ".join(x for x in [r["away_qb"], r["home_qb"]] if x), axis=1
+)
+
 # ----- ATS picks table -----
 st.subheader("Against the Spread")
 
@@ -134,7 +176,7 @@ confidence_filter = st.multiselect(
 ats_view = (
     g[g["confidence"].isin(confidence_filter)]
     .sort_values("ats_edge_pts", ascending=False)
-    [["matchup", "vegas_line", "model_line", "ats_pick_team", "ats_edge_pts", "confidence"]]
+    [["matchup", "vegas_line", "model_line", "ats_pick_team", "ats_edge_pts", "confidence", "qb_notes"]]
     .rename(columns={
         "matchup": "Matchup",
         "vegas_line": "Vegas",
@@ -142,6 +184,7 @@ ats_view = (
         "ats_pick_team": "Pick",
         "ats_edge_pts": "Edge (pts)",
         "confidence": "Confidence",
+        "qb_notes": "QB status",
     })
 )
 
