@@ -3,11 +3,14 @@ NFL Picks dashboard. Run locally: streamlit run app.py
 Deployed at share.streamlit.io for sharing with friends.
 """
 from pathlib import Path
+import datetime as dt
 import pickle
 import pandas as pd
 import nflreadpy as nfl
 import streamlit as st
 from scipy.stats import norm
+
+from weather import forecast_wind_for_game, under_recommendation
 
 ROOT = Path(__file__).parent
 MODEL_PATH = ROOT / "models" / "margin_model.pkl"
@@ -231,6 +234,71 @@ st.dataframe(
     use_container_width=True,
     column_config={
         "Win prob": st.column_config.ProgressColumn(format="%.0f%%", min_value=0.5, max_value=1.0),
+    },
+)
+
+# ----- Totals: wind UNDER plays (Phase 2 weather edge) -----
+st.subheader("Totals — Wind UNDER plays")
+st.caption(
+    "Backed by 1999-2025 nflverse data: outdoor games with wind ≥10 mph hit UNDER 54.7% "
+    "(n=1,770); wind ≥15 mph hits 56.2% (n=642). Forecasts via NOAA, refresh every 15 min."
+)
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_wind_for_game(home_team: str, kickoff_iso: str) -> float | None:
+    """Cached wrapper — keyed on (team, kickoff). Returns mph or None."""
+    if not kickoff_iso:
+        return None
+    return forecast_wind_for_game(home_team, dt.datetime.fromisoformat(kickoff_iso))
+
+def kickoff_utc(row) -> str:
+    """Best-effort kickoff timestamp from nflverse columns. Returns ISO or ''."""
+    gd, gt = row.get("gameday"), row.get("gametime")
+    if pd.isna(gd) or not gd:
+        return ""
+    try:
+        if gt and not pd.isna(gt):
+            local = dt.datetime.fromisoformat(f"{gd}T{gt}")
+        else:
+            local = dt.datetime.fromisoformat(f"{gd}T13:00:00")
+        # nflverse times are US Eastern; convert to UTC for NOAA matching
+        return (local - dt.timedelta(hours=5)).replace(tzinfo=dt.timezone.utc).isoformat()
+    except (ValueError, TypeError):
+        return ""
+
+totals = g[["matchup", "home_team", "away_team", "total_line", "roof", "gameday", "gametime"]].copy()
+totals["kickoff_iso"] = totals.apply(kickoff_utc, axis=1)
+totals["wind_mph"] = totals.apply(
+    lambda r: fetch_wind_for_game(r["home_team"], r["kickoff_iso"]), axis=1
+)
+totals[["rec", "reason"]] = totals.apply(
+    lambda r: pd.Series(under_recommendation(r["wind_mph"], r["roof"])), axis=1
+)
+
+totals_view = (
+    totals.sort_values(
+        ["rec", "wind_mph"],
+        key=lambda s: s.map({"🔥 STRONG UNDER": 0, "📈 LEAN UNDER": 1, "⏳ pending": 2, "— pass": 3, "— indoor": 4})
+        if s.name == "rec" else -s.fillna(-1),
+    )
+    [["matchup", "total_line", "roof", "wind_mph", "rec", "reason"]]
+    .rename(columns={
+        "matchup": "Matchup",
+        "total_line": "Total",
+        "roof": "Roof",
+        "wind_mph": "Wind (mph)",
+        "rec": "Pick",
+        "reason": "Why",
+    })
+)
+
+st.dataframe(
+    totals_view,
+    hide_index=True,
+    use_container_width=True,
+    column_config={
+        "Total": st.column_config.NumberColumn(format="%.1f"),
+        "Wind (mph)": st.column_config.NumberColumn(format="%.0f"),
     },
 )
 
