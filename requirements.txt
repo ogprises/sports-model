@@ -1,0 +1,13 @@
+nflreadpy
+pandas
+numpy
+polars
+pyarrow
+scikit-learn
+xgboost
+scipy
+streamlit
+matplotlib
+seaborn
+jupyter
+ipykernel
